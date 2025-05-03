@@ -1,0 +1,94 @@
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import Optional
+import openai
+from sqlalchemy import create_engine, Column, Integer, String, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# OpenAI API key
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# Database Setup (Optional)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./history.db")
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# FastAPI app
+app = FastAPI()
+
+# Models
+class CodeRequest(BaseModel):
+    code: str
+    save_history: Optional[bool] = False
+
+class History(Base):
+    __tablename__ = "history"
+    id = Column(Integer, primary_key=True, index=True)
+    input_code = Column(Text, nullable=False)
+    corrected_code = Column(Text, nullable=False)
+
+# Create database tables
+Base.metadata.create_all(bind=engine)
+
+# Endpoints
+@app.post("/correct-code/")
+async def correct_code(request: CodeRequest):
+    try:
+        # Send the code to OpenAI for correction
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a code corrector. Fix syntax errors, logical issues, and improve code."},
+                {"role": "user", "content": f"Please correct this code:\n{request.code}"}
+            ],
+            temperature=0
+        )
+
+        corrected_code = response['choices'][0]['message']['content'].strip()
+
+        # Save history if requested
+        if request.save_history:
+            db = SessionLocal()
+            history_entry = History(input_code=request.code, corrected_code=corrected_code)
+            db.add(history_entry)
+            db.commit()
+            db.refresh(history_entry)
+            db.close()
+
+        return {"corrected_code": corrected_code}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/history/")
+def get_history():
+    db = SessionLocal()
+    records = db.query(History).all()
+    db.close()
+    return [{"id": rec.id, "input_code": rec.input_code, "corrected_code": rec.corrected_code} for rec in records]
+
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+# CORS Settings
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # You can also set it to ["http://localhost:3000"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+
+
+def read_root():
+    return {"message": "Backend is running ✅"}
